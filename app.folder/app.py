@@ -24,7 +24,7 @@ warnings.filterwarnings('ignore')
 
 # ページ設定
 st.set_page_config(
-    page_title="Excel データ分析アプリ",
+    page_title="C3slim データ分析アプリ",
     page_icon="📊",
     layout="wide"
 )
@@ -434,20 +434,8 @@ def main():
                     baseline_dict = {}
                     if len(df_full) >= 2:
                         baseline_row = df_full.iloc[1]
-                        # 数値に変換可能な値が含まれているかチェック
-                        numeric_count = 0
-                        total_count = 0
-                        for val in baseline_row:
-                            if pd.notna(val):
-                                total_count += 1
-                                try:
-                                    float(val)
-                                    numeric_count += 1
-                                except:
-                                    pass
-                        
-                        # 50%以上が数値の場合のみ基準値として保存
-                        if total_count > 0 and numeric_count / total_count >= 0.5:
+                        # 全列がNaNでない場合のみ基準値として保存
+                        if not baseline_row.isna().all():
                             baseline_dict = baseline_row.to_dict()
                     all_baseline_values[sheet_name] = baseline_dict
                     
@@ -506,10 +494,11 @@ def main():
         df_clean = st.session_state.df_clean
         
         # タブでコンテンツを整理
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
             "📋 データプレビュー", 
             "📈 基本統計量", 
-            "📊 ヒストグラム", 
+            "📊 ヒストグラム",
+            "🔵 散布図",
             "🎨 カスタムグラフ",
             "🔍 データフィルタリング"
         ])
@@ -811,6 +800,72 @@ def main():
                 st.warning("⚠️ 数値列が見つかりませんでした。")
         
         with tab4:
+            st.header("🔵 散布図")
+            
+            numeric_cols = df_clean.select_dtypes(include=[np.number]).columns.tolist()
+            all_cols = df_clean.columns.tolist()
+            
+            if len(numeric_cols) >= 2:
+                st.subheader("📊 散布図設定")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    x_axis = st.selectbox("X軸:", numeric_cols, key="scatter_x_axis")
+                
+                with col2:
+                    y_axis = st.selectbox(
+                        "Y軸:", 
+                        [col for col in numeric_cols if col != x_axis], 
+                        key="scatter_y_axis"
+                    )
+                
+                # カラー設定
+                color_col = st.selectbox(
+                    "色分け列（オプション）:",
+                    ["なし"] + all_cols,
+                    key="scatter_color"
+                )
+                
+                # グラフ生成
+                if st.button("📈 散布図を生成", type="primary", key="scatter_button"):
+                    try:
+                        color_param = None if color_col == "なし" else color_col
+                        
+                        fig = px.scatter(
+                            df_clean,
+                            x=x_axis,
+                            y=y_axis,
+                            color=color_param,
+                            title=f"{y_axis} vs {x_axis}の散布図",
+                            labels={x_axis: x_axis, y_axis: y_axis}
+                        )
+                        
+                        fig.update_layout(
+                            title_font_size=16,
+                            xaxis_title_font_size=14,
+                            yaxis_title_font_size=14
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        # 相関係数を表示
+                        correlation = df_clean[[x_axis, y_axis]].corr().iloc[0, 1]
+                        st.metric("相関係数", f"{correlation:.3f}")
+                        
+                        if abs(correlation) >= 0.7:
+                            st.success("✅ 強い相関があります")
+                        elif abs(correlation) >= 0.4:
+                            st.info("👍 中程度の相関があります")
+                        else:
+                            st.warning("⚠️ 弱い相関です")
+                    
+                    except Exception as e:
+                        st.error(f"グラフの生成に失敗しました: {str(e)}")
+            else:
+                st.warning("⚠️ 散布図を作成するには、少なくとも2つの数値列が必要です。")
+        
+        with tab5:
             st.header("🎨 カスタムグラフ")
             
             numeric_cols = df_clean.select_dtypes(include=[np.number]).columns.tolist()
@@ -904,7 +959,7 @@ def main():
             else:
                 st.warning("⚠️ 数値列が見つかりませんでした。")
         
-        with tab5:
+        with tab6:
             st.header("🔍 データフィルタリング")
             
             st.subheader("📋 フィルター条件設定")
