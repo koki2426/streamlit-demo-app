@@ -158,6 +158,7 @@ def calc_cpk(df: pd.DataFrame, usl: float, lsl: float) -> pd.DataFrame:
         out.append({"列名": c, "平均値": round(mu, 2), "標準偏差": round(sd, 2), "Cp": round(cp, 3), "Cpk": round(cpk, 3)})
     return pd.DataFrame(out)
 
+# Plotly（インタラクティブ）ヒスト
 def hist_with_gauss(df: pd.DataFrame, col: str, usl: float | None, lsl: float | None):
     data = df[col].dropna()
     if data.empty:
@@ -185,6 +186,7 @@ def hist_with_gauss(df: pd.DataFrame, col: str, usl: float | None, lsl: float | 
         fig.add_vline(x=lsl, line_dash="dash", line_color="orange", line_width=2, annotation_text="LSL", annotation_position="top")
     return fig
 
+# CSV出力（文字化け対策）
 def csv_bytes(df: pd.DataFrame, encoding: str = "cp932") -> bytes:
     """Excel向け(Windows)の既定はcp932。UTF-8(BOM)も選べる。"""
     csv_text = df.to_csv(index=False)
@@ -195,7 +197,56 @@ def csv_bytes(df: pd.DataFrame, encoding: str = "cp932") -> bytes:
     else:
         return csv_text.encode(encoding, errors="replace")
 
-# ---------------- PDF 生成（日本語対応・全件出力） ----------------
+# ---------------- Matplotlib 散布図（PDF用に画像で作成） ----------------
+def make_scatter_cumulative_fig(df: pd.DataFrame, x: str, color_col: str | None = None, fontname: str | None = None):
+    """Y=1..N（累積件数）散布図の matplotlib Figure を返す"""
+    df2 = df[[x]].dropna().copy()
+    # 並び順：数値/日時なら昇順
+    if pd.api.types.is_numeric_dtype(df2[x]) or pd.api.types.is_datetime64_any_dtype(df2[x]):
+        df2 = df2.sort_values(by=x, kind="mergesort")
+    df2["データ数"] = np.arange(1, len(df2) + 1)
+    if color_col and color_col in df.columns:
+        df2[color_col] = df.loc[df2.index, color_col]
+
+    fig, ax = plt.subplots(figsize=(6, 3))
+    if color_col and color_col in df2.columns:
+        for name, g in df2.groupby(color_col):
+            ax.scatter(g[x], g["データ数"], s=10, label=str(name))
+        ax.legend(fontsize=8, loc="best")
+    else:
+        ax.scatter(df2[x], df2["データ数"], s=10)
+
+    if fontname:
+        ax.set_title(f"累積データ数 vs {x}", fontname=fontname)
+        ax.set_xlabel(x, fontname=fontname)
+        ax.set_ylabel("データ数", fontname=fontname)
+    else:
+        ax.set_title(f"累積データ数 vs {x}")
+        ax.set_xlabel(x)
+        ax.set_ylabel("データ数")
+    fig.tight_layout()
+    return fig
+
+def make_scatter_counts_fig(df: pd.DataFrame, x: str, fontname: str | None = None):
+    """Y=各値の件数（頻度）散布図の matplotlib Figure を返す"""
+    df2 = df[[x]].dropna().copy()
+    cnt = df2.groupby(x, dropna=False).size().reset_index(name="データ数")
+
+    fig, ax = plt.subplots(figsize=(6, 3))
+    ax.scatter(cnt[x], cnt["データ数"], s=12)
+
+    if fontname:
+        ax.set_title(f"{x} ごとの件数", fontname=fontname)
+        ax.set_xlabel(x, fontname=fontname)
+        ax.set_ylabel("データ数", fontname=fontname)
+    else:
+        ax.set_title(f"{x} ごとの件数")
+        ax.set_xlabel(x)
+        ax.set_ylabel("データ数")
+    fig.tight_layout()
+    return fig
+
+# ---------------- PDF 生成（日本語対応・全件出力・散布図含む） ----------------
 def _jp_paragraph_styles():
     styles = getSampleStyleSheet()
     title = ParagraphStyle(
@@ -232,7 +283,29 @@ def _jp_table_style(header_bold=True):
     ]
     return TableStyle(base)
 
-def generate_pdf(df_clean: pd.DataFrame, stats_df: pd.DataFrame | None, sheet_name: str, masks: dict) -> bytes | None:
+def generate_pdf(
+    df_clean: pd.DataFrame,
+    stats_df: pd.DataFrame | None,
+    sheet_name: str,
+    masks: dict,
+    pdf_opts: dict | None = None
+) -> bytes | None:
+    """pdf_opts:
+        {
+          'include_hist': True/False,
+          'include_scatter_cum': True/False,
+          'include_scatter_cnt': True/False,
+          'scatter_x': str | None,
+          'scatter_color': str | None
+        }
+    """
+    pdf_opts = pdf_opts or {}
+    include_hist = pdf_opts.get('include_hist', True)
+    include_scatter_cum = pdf_opts.get('include_scatter_cum', False)
+    include_scatter_cnt = pdf_opts.get('include_scatter_cnt', False)
+    scatter_x = pdf_opts.get('scatter_x', None)
+    scatter_color = pdf_opts.get('scatter_color', None)
+
     try:
         tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
         pdf_path = tmp_pdf.name
@@ -274,29 +347,50 @@ def generate_pdf(df_clean: pd.DataFrame, stats_df: pd.DataFrame | None, sheet_na
             story += [Paragraph("Basic Statistics", h2_style), t_stats, Spacer(1, 0.2 * inch)]
 
         # ヒスト（全数値列）
-        ncols = numeric_cols(df_clean)
-        if ncols:
-            story += [PageBreak(), Paragraph("Distribution Charts", h2_style), Spacer(1, 0.1 * inch)]
-            for i, c in enumerate(ncols):
-                fig, ax = plt.subplots(figsize=(6, 3))
-                df_clean[c].dropna().hist(bins=30, ax=ax, edgecolor="black")
-                if MPL_FONT_NAME:
-                    ax.set_title(f"{c} Distribution", fontname=MPL_FONT_NAME)
-                    ax.set_xlabel(c, fontname=MPL_FONT_NAME)
-                    ax.set_ylabel("Frequency", fontname=MPL_FONT_NAME)
-                else:
-                    ax.set_title(f"{c} Distribution")
-                    ax.set_xlabel(c)
-                    ax.set_ylabel("Frequency")
+        if include_hist:
+            ncols = numeric_cols(df_clean)
+            if ncols:
+                story += [PageBreak(), Paragraph("Distribution Charts", h2_style), Spacer(1, 0.1 * inch)]
+                for i, c in enumerate(ncols):
+                    fig, ax = plt.subplots(figsize=(6, 3))
+                    df_clean[c].dropna().hist(bins=30, ax=ax, edgecolor="black")
+                    if MPL_FONT_NAME:
+                        ax.set_title(f"{c} Distribution", fontname=MPL_FONT_NAME)
+                        ax.set_xlabel(c, fontname=MPL_FONT_NAME)
+                        ax.set_ylabel("Frequency", fontname=MPL_FONT_NAME)
+                    else:
+                        ax.set_title(f"{c} Distribution")
+                        ax.set_xlabel(c)
+                        ax.set_ylabel("Frequency")
 
+                    tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+                    plt.savefig(tmp_img.name, bbox_inches="tight", dpi=110)
+                    plt.close()
+                    tmp_imgs.append(tmp_img.name)
+
+                    story += [Image(tmp_img.name, width=5 * inch, height=2.5 * inch), Spacer(1, 0.2 * inch)]
+                    if (i + 1) % 2 == 0 and i < len(ncols) - 1:
+                        story.append(PageBreak())
+
+        # 散布図（Y=データ数 固定）
+        if (include_scatter_cum or include_scatter_cnt) and scatter_x:
+            story += [PageBreak(), Paragraph("Count-based Scatter Charts", h2_style), Spacer(1, 0.1 * inch)]
+
+            if include_scatter_cum:
+                fig = make_scatter_cumulative_fig(df_clean, scatter_x, color_col=scatter_color, fontname=MPL_FONT_NAME)
                 tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
                 plt.savefig(tmp_img.name, bbox_inches="tight", dpi=110)
                 plt.close()
                 tmp_imgs.append(tmp_img.name)
-
                 story += [Image(tmp_img.name, width=5 * inch, height=2.5 * inch), Spacer(1, 0.2 * inch)]
-                if (i + 1) % 2 == 0 and i < len(ncols) - 1:
-                    story.append(PageBreak())
+
+            if include_scatter_cnt:
+                fig = make_scatter_counts_fig(df_clean, scatter_x, fontname=MPL_FONT_NAME)
+                tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+                plt.savefig(tmp_img.name, bbox_inches="tight", dpi=110)
+                plt.close()
+                tmp_imgs.append(tmp_img.name)
+                story += [Image(tmp_img.name, width=5 * inch, height=2.5 * inch), Spacer(1, 0.2 * inch)]
 
         doc.build(story)
 
@@ -378,7 +472,7 @@ def main():
             st.caption(f"表示: 上位10行 / 全{len(df_raw)}行")
         with c2:
             st.write("🧹 **クリーニング後**"); st.dataframe(df_clean.head(10), use_container_width=True)
-            st.caption(f"表示: 上位10行 / 全{len(df_clean)}行")
+            st.caption(f"表示: 上位10行 / 全{len[df_clean]}行")
 
         st.subheader("📋 データ型/欠損")
         c1, c2 = st.columns(2)
@@ -493,21 +587,67 @@ def main():
     with tab4:
         st.subheader("🔵 散布図")
         ncols = numeric_cols(df_clean)
-        if len(ncols) < 2:
-            st.warning("少なくとも2つの数値列が必要です。")
+        all_cols = df_clean.columns.tolist()
+
+        if len(ncols) < 1:
+            st.warning("少なくとも1つの数値列が必要です。")
         else:
-            c1, c2 = st.columns(2)
-            with c1: x = st.selectbox("X軸", ncols, key="scatter_x")
-            with c2: y = st.selectbox("Y軸", [c for c in ncols if c != x], key="scatter_y")
-            color_col = st.selectbox("色分け列（任意）", ["なし"] + df_clean.columns.tolist(), key="scatter_color")
-            if st.button("📈 作成", type="primary"):
-                color_param = None if color_col == "なし" else color_col
-                fig = px.scatter(df_clean, x=x, y=y, color=color_param, title=f"{y} vs {x}")
-                fig.update_layout(title_font_size=16, xaxis_title=x, yaxis_title=y)
-                st.plotly_chart(fig, use_container_width=True)
-                corr = df_clean[[x, y]].corr().iloc[0, 1]
-                st.metric("相関係数", f"{corr:.3f}")
-                st.info("✅ 強い相関" if abs(corr) >= 0.7 else ("👍 中程度の相関" if abs(corr) >= 0.4 else "⚠️ 弱い相関"))
+            # Y軸モード選択
+            mode = st.radio(
+                "Y軸をどう扱いますか？",
+                ["通常（列を選択）", "累積データ数（1..N）", "各値の件数（Xごとの件数）"],
+                index=0, horizontal=True
+            )
+
+            # X軸の選択（通常は数値列、件数系は任意列OK）
+            if mode == "通常（列を選択）":
+                x = st.selectbox("X軸（数値列）", ncols, key="scatter_x_fixed")
+            else:
+                x = st.selectbox("X軸（任意の列）", all_cols, key="scatter_x_fixed_any")
+
+            color_col = st.selectbox("色分け列（任意）", ["なし"] + all_cols, key="scatter_color_fixed")
+
+            if mode == "通常（列を選択）":
+                y_candidates = [c for c in ncols if c != x] if x in ncols else ncols
+                y = st.selectbox("Y軸（数値列）", y_candidates, key="scatter_y_fixed")
+
+                if st.button("📈 作成", type="primary", key="scatter_btn_norm"):
+                    color_param = None if color_col == "なし" else color_col
+                    fig = px.scatter(df_clean, x=x, y=y, color=color_param, title=f"{y} vs {x}")
+                    fig.update_layout(title_font_size=16, xaxis_title=x, yaxis_title=y)
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # 相関係数（数値列のみ）
+                    try:
+                        corr = df_clean[[x, y]].corr().iloc[0, 1]
+                        st.metric("相関係数", f"{corr:.3f}")
+                        st.info("✅ 強い相関" if abs(corr) >= 0.7 else ("👍 中程度の相関" if abs(corr) >= 0.4 else "⚠️ 弱い相関"))
+                    except Exception:
+                        pass
+
+            elif mode == "累積データ数（1..N）":
+                st.caption("Xを並べ、Y=1..N（累積件数）として描画します。")
+                if st.button("📈 作成", type="primary", key="scatter_btn_cum"):
+                    df2 = df_clean[[x]].dropna().copy()
+                    if pd.api.types.is_numeric_dtype(df2[x]) or pd.api.types.is_datetime64_any_dtype(df2[x]):
+                        df2 = df2.sort_values(by=x, kind="mergesort")
+                    df2["データ数"] = np.arange(1, len(df2) + 1)
+                    color_param = None if color_col == "なし" else color_col
+                    if color_param and color_param in df_clean.columns:
+                        df2[color_param] = df_clean.loc[df2.index, color_param]
+                    fig = px.scatter(df2, x=x, y="データ数", color=(None if color_col == "なし" else color_col),
+                                    title=f"累積データ数 vs {x}")
+                    fig.update_layout(title_font_size=16, xaxis_title=x, yaxis_title="データ数")
+                    st.plotly_chart(fig, use_container_width=True)
+
+            else:  # "各値の件数（Xごとの件数）"
+                st.caption("X の各値（カテゴリ/数値）ごとの出現回数を Y=データ数 として描画します。")
+                if st.button("📈 作成", type="primary", key="scatter_btn_freq"):
+                    df2 = df_clean[[x]].dropna()
+                    cnt = df2.groupby(x, dropna=False).size().reset_index(name="データ数")
+                    fig = px.scatter(cnt, x=x, y="データ数", title=f"{x} ごとの件数")
+                    fig.update_layout(title_font_size=16, xaxis_title=x, yaxis_title="データ数")
+                    st.plotly_chart(fig, use_container_width=True)
 
     with tab5:
         st.subheader("🎨 カスタムグラフ")
@@ -570,6 +710,21 @@ def main():
     # ---------------- エクスポート ----------------
     st.markdown("---")
     st.subheader("💾 エクスポート")
+
+    # PDF 出力オプション（ヒスト全数、散布図Y=データ数）
+    st.markdown("#### 📝 PDF オプション")
+    pdf_include_hist = st.checkbox("数値列のヒストグラムをすべて含める", value=True)
+    pdf_include_scatter_cum = st.checkbox("散布図（累積データ数 1..N）を含める", value=False)
+    pdf_include_scatter_cnt = st.checkbox("散布図（各値の件数）を含める", value=False)
+
+    cpx1, cpx2 = st.columns(2)
+    with cpx1:
+        scatter_x_for_pdf = st.selectbox("PDF用 散布図のX軸列", df_clean.columns.tolist(), index=0)
+    with cpx2:
+        scatter_color_for_pdf = st.selectbox("PDF用 色分け列（任意）", ["なし"] + df_clean.columns.tolist(), index=0)
+        if scatter_color_for_pdf == "なし":
+            scatter_color_for_pdf = None
+
     c1, c2, c3 = st.columns(3)
     with c1:
         st.download_button("📥 元データCSV", data=csv_bytes(df_raw, st.session_state["csv_enc"]),
@@ -581,7 +736,16 @@ def main():
         if st.button("📄 PDFレポート生成", type="primary"):
             with st.spinner("PDFを生成中..."):
                 stats_df = basic_stats(df_clean, masks, base)
-                pdf = generate_pdf(df_clean, stats_df, st.session_state.sheet or "データ", masks)
+                pdf = generate_pdf(
+                    df_clean, stats_df, st.session_state.sheet or "データ", masks,
+                    pdf_opts={
+                        'include_hist': pdf_include_hist,
+                        'include_scatter_cum': pdf_include_scatter_cum,
+                        'include_scatter_cnt': pdf_include_scatter_cnt,
+                        'scatter_x': scatter_x_for_pdf,
+                        'scatter_color': scatter_color_for_pdf
+                    }
+                )
                 if pdf:
                     st.download_button("📥 PDFレポート", pdf,
                                        f"analysis_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
