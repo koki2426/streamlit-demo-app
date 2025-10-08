@@ -1,5 +1,5 @@
 # app.py ― 日本語PDF対応・全件レポート・CSV文字化け対策・
-#            「Y=データ数」散布図（累積/件数）＆PDF出力対応 【修正版 完全版】
+#            「Y=データ数」散布図（累積/件数）＆PDF出力対応・軸反転【完全版】
 import warnings
 from pathlib import Path
 from datetime import datetime
@@ -198,9 +198,10 @@ def csv_bytes(df: pd.DataFrame, encoding: str = "cp932") -> bytes:
     else:
         return csv_text.encode(encoding, errors="replace")
 
-# ---------------- Matplotlib 散布図（PDF用に画像で作成） ----------------
-def make_scatter_cumulative_fig(df: pd.DataFrame, x: str, color_col: str | None = None, fontname: str | None = None):
-    """Y=1..N（累積件数）散布図の matplotlib Figure を返す"""
+# ---------------- Matplotlib 散布図（PDF用に画像で作成：軸反転対応） ----------------
+def make_scatter_cumulative_fig(df: pd.DataFrame, x: str, color_col: str | None = None,
+                                fontname: str | None = None, flip: bool = False):
+    """Y=1..N（累積件数）散布図の matplotlib Figure を返す（flip=True で軸反転）"""
     df2 = df[[x]].dropna().copy()
     # 並び順：数値/日時なら昇順
     if pd.api.types.is_numeric_dtype(df2[x]) or pd.api.types.is_datetime64_any_dtype(df2[x]):
@@ -212,42 +213,71 @@ def make_scatter_cumulative_fig(df: pd.DataFrame, x: str, color_col: str | None 
     fig, ax = plt.subplots(figsize=(6, 3))
     if color_col and color_col in df2.columns:
         for name, g in df2.groupby(color_col):
-            ax.scatter(g[x], g["データ数"], s=10, label=str(name))
+            if flip:
+                ax.scatter(g["データ数"], g[x], s=10, label=str(name))
+            else:
+                ax.scatter(g[x], g["データ数"], s=10, label=str(name))
         ax.legend(fontsize=8, loc="best")
     else:
-        ax.scatter(df2[x], df2["データ数"], s=10)
+        if flip:
+            ax.scatter(df2["データ数"], df2[x], s=10)
+        else:
+            ax.scatter(df2[x], df2["データ数"], s=10)
 
     if fontname:
-        ax.set_title(f"累積データ数 vs {x}", fontname=fontname)
-        ax.set_xlabel(x, fontname=fontname)
-        ax.set_ylabel("データ数", fontname=fontname)
+        if flip:
+            ax.set_title(f"{x} vs 累積データ数", fontname=fontname)
+            ax.set_xlabel("データ数", fontname=fontname)
+            ax.set_ylabel(x, fontname=fontname)
+        else:
+            ax.set_title(f"累積データ数 vs {x}", fontname=fontname)
+            ax.set_xlabel(x, fontname=fontname)
+            ax.set_ylabel("データ数", fontname=fontname)
     else:
-        ax.set_title(f"累積データ数 vs {x}")
-        ax.set_xlabel(x)
-        ax.set_ylabel("データ数")
+        if flip:
+            ax.set_title(f"{x} vs 累積データ数")
+            ax.set_xlabel("データ数")
+            ax.set_ylabel(x)
+        else:
+            ax.set_title(f"累積データ数 vs {x}")
+            ax.set_xlabel(x)
+            ax.set_ylabel("データ数")
     fig.tight_layout()
     return fig
 
-def make_scatter_counts_fig(df: pd.DataFrame, x: str, fontname: str | None = None):
-    """Y=各値の件数（頻度）散布図の matplotlib Figure を返す"""
+def make_scatter_counts_fig(df: pd.DataFrame, x: str, fontname: str | None = None, flip: bool = False):
+    """Y=各値の件数（頻度）散布図の matplotlib Figure を返す（flip=True で軸反転）"""
     df2 = df[[x]].dropna().copy()
     cnt = df2.groupby(x, dropna=False).size().reset_index(name="データ数")
 
     fig, ax = plt.subplots(figsize=(6, 3))
-    ax.scatter(cnt[x], cnt["データ数"], s=12)
+    if flip:
+        ax.scatter(cnt["データ数"], cnt[x], s=12)
+    else:
+        ax.scatter(cnt[x], cnt["データ数"], s=12)
 
     if fontname:
-        ax.set_title(f"{x} ごとの件数", fontname=fontname)
-        ax.set_xlabel(x, fontname=fontname)
-        ax.set_ylabel("データ数", fontname=fontname)
+        if flip:
+            ax.set_title(f"{x} vs 件数", fontname=fontname)
+            ax.set_xlabel("データ数", fontname=fontname)
+            ax.set_ylabel(x, fontname=fontname)
+        else:
+            ax.set_title(f"{x} ごとの件数", fontname=fontname)
+            ax.set_xlabel(x, fontname=fontname)
+            ax.set_ylabel("データ数", fontname=fontname)
     else:
-        ax.set_title(f"{x} ごとの件数")
-        ax.set_xlabel(x)
-        ax.set_ylabel("データ数")
+        if flip:
+            ax.set_title(f"{x} vs 件数")
+            ax.set_xlabel("データ数")
+            ax.set_ylabel(x)
+        else:
+            ax.set_title(f"{x} ごとの件数")
+            ax.set_xlabel(x)
+            ax.set_ylabel("データ数")
     fig.tight_layout()
     return fig
 
-# ---------------- PDF 生成（日本語対応・全件出力・散布図含む） ----------------
+# ---------------- PDF 生成（日本語対応・全件出力・散布図含む・軸反転対応） ----------------
 def _jp_paragraph_styles():
     styles = getSampleStyleSheet()
     title = ParagraphStyle(
@@ -297,7 +327,8 @@ def generate_pdf(
           'include_scatter_cum': True/False,
           'include_scatter_cnt': True/False,
           'scatter_x': str | None,
-          'scatter_color': str | None
+          'scatter_color': str | None,
+          'scatter_flip': True/False
         }
     """
     pdf_opts = pdf_opts or {}
@@ -306,6 +337,7 @@ def generate_pdf(
     include_scatter_cnt = pdf_opts.get('include_scatter_cnt', False)
     scatter_x = pdf_opts.get('scatter_x', None)
     scatter_color = pdf_opts.get('scatter_color', None)
+    scatter_flip = pdf_opts.get('scatter_flip', False)
 
     try:
         tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
@@ -365,7 +397,7 @@ def generate_pdf(
                         ax.set_ylabel("Frequency")
 
                     tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-                    fig.savefig(tmp_img.name, bbox_inches="tight", dpi=110)  # ← fig.savefig に修正
+                    fig.savefig(tmp_img.name, bbox_inches="tight", dpi=110)
                     plt.close(fig)
                     tmp_imgs.append(tmp_img.name)
 
@@ -373,22 +405,26 @@ def generate_pdf(
                     if (i + 1) % 2 == 0 and i < len(ncols) - 1:
                         story.append(PageBreak())
 
-        # 散布図（Y=データ数 固定）
+        # 散布図（Y=データ数 固定、軸反転対応）
         if (include_scatter_cum or include_scatter_cnt) and scatter_x:
             story += [PageBreak(), Paragraph("Count-based Scatter Charts", h2_style), Spacer(1, 0.1 * inch)]
 
             if include_scatter_cum:
-                fig = make_scatter_cumulative_fig(df_clean, scatter_x, color_col=scatter_color, fontname=MPL_FONT_NAME)
+                fig = make_scatter_cumulative_fig(
+                    df_clean, scatter_x, color_col=scatter_color, fontname=MPL_FONT_NAME, flip=scatter_flip
+                )
                 tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-                fig.savefig(tmp_img.name, bbox_inches="tight", dpi=110)  # ← fig.savefig に修正
+                fig.savefig(tmp_img.name, bbox_inches="tight", dpi=110)
                 plt.close(fig)
                 tmp_imgs.append(tmp_img.name)
                 story += [Image(tmp_img.name, width=5 * inch, height=2.5 * inch), Spacer(1, 0.2 * inch)]
 
             if include_scatter_cnt:
-                fig = make_scatter_counts_fig(df_clean, scatter_x, fontname=MPL_FONT_NAME)
+                fig = make_scatter_counts_fig(
+                    df_clean, scatter_x, fontname=MPL_FONT_NAME, flip=scatter_flip
+                )
                 tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-                fig.savefig(tmp_img.name, bbox_inches="tight", dpi=110)  # ← fig.savefig に修正
+                fig.savefig(tmp_img.name, bbox_inches="tight", dpi=110)
                 plt.close(fig)
                 tmp_imgs.append(tmp_img.name)
                 story += [Image(tmp_img.name, width=5 * inch, height=2.5 * inch), Spacer(1, 0.2 * inch)]
@@ -473,7 +509,7 @@ def main():
             st.caption(f"表示: 上位10行 / 全{len(df_raw)}行")
         with c2:
             st.write("🧹 **クリーニング後**"); st.dataframe(df_clean.head(10), use_container_width=True)
-            st.caption(f"表示: 上位10行 / 全{len(df_clean)}行")  # ← 修正済み
+            st.caption(f"表示: 上位10行 / 全{len(df_clean)}行")
 
         st.subheader("📋 データ型/欠損")
         c1, c2 = st.columns(2)
@@ -593,32 +629,39 @@ def main():
         if len(ncols) < 1:
             st.warning("少なくとも1つの数値列が必要です。")
         else:
-            # Y軸モード選択
-            mode = st.radio(
-                "Y軸をどう扱いますか？",
-                ["通常（列を選択）", "累積データ数（1..N）", "各値の件数（Xごとの件数）"],
-                index=0, horizontal=True
-            )
+            # Y軸モード選択 & 軸反転トグル
+            ctop1, ctop2 = st.columns([3, 1])
+            with ctop1:
+                mode = st.radio(
+                    "Y軸をどう扱いますか？",
+                    ["通常（列を選択）", "累積データ数（1..N）", "各値の件数（Xごとの件数）"],
+                    index=0, horizontal=True
+                )
+            with ctop2:
+                flip_axes = st.checkbox("XとYを反転（X↔Y）", value=False, help="散布図のX軸とY軸を入れ替えます。")
 
             # X軸の選択（通常は数値列、件数系は任意列OK）
             if mode == "通常（列を選択）":
                 x = st.selectbox("X軸（数値列）", ncols, key="scatter_x_fixed")
+                y_candidates = [c for c in ncols if c != x] if x in ncols else ncols
+                y = st.selectbox("Y軸（数値列）", y_candidates, key="scatter_y_fixed")
             else:
                 x = st.selectbox("X軸（任意の列）", all_cols, key="scatter_x_fixed_any")
+                y = None  # 固定モードでは未使用
 
             color_col = st.selectbox("色分け列（任意）", ["なし"] + all_cols, key="scatter_color_fixed")
 
             if mode == "通常（列を選択）":
-                y_candidates = [c for c in ncols if c != x] if x in ncols else ncols
-                y = st.selectbox("Y軸（数値列）", y_candidates, key="scatter_y_fixed")
-
                 if st.button("📈 作成", type="primary", key="scatter_btn_norm"):
                     color_param = None if color_col == "なし" else color_col
-                    fig = px.scatter(df_clean, x=x, y=y, color=color_param, title=f"{y} vs {x}")
-                    fig.update_layout(title_font_size=16, xaxis_title=x, yaxis_title=y)
+                    # 軸反転：x/y を入れ替えて描画
+                    plot_x, plot_y = (y, x) if flip_axes else (x, y)
+                    fig = px.scatter(df_clean, x=plot_x, y=plot_y, color=color_param,
+                                     title=f"{plot_y} vs {plot_x}")
+                    fig.update_layout(title_font_size=16, xaxis_title=plot_x, yaxis_title=plot_y)
                     st.plotly_chart(fig, use_container_width=True)
 
-                    # 相関係数（数値列のみ）
+                    # 相関係数（対称なので反転しても値は同じ）
                     try:
                         corr = df_clean[[x, y]].corr().iloc[0, 1]
                         st.metric("相関係数", f"{corr:.3f}")
@@ -636,9 +679,16 @@ def main():
                     color_param = None if color_col == "なし" else color_col
                     if color_param and color_param in df_clean.columns:
                         df2[color_param] = df_clean.loc[df2.index, color_param]
-                    fig = px.scatter(df2, x=x, y="データ数", color=(None if color_col == "なし" else color_col),
-                                    title=f"累積データ数 vs {x}")
-                    fig.update_layout(title_font_size=16, xaxis_title=x, yaxis_title="データ数")
+
+                    if flip_axes:
+                        fig = px.scatter(df2, x="データ数", y=x, color=(None if color_col == "なし" else color_col),
+                                         title=f"{x} vs 累積データ数")
+                        fig.update_layout(xaxis_title="データ数", yaxis_title=x)
+                    else:
+                        fig = px.scatter(df2, x=x, y="データ数", color=(None if color_col == "なし" else color_col),
+                                         title=f"累積データ数 vs {x}")
+                        fig.update_layout(xaxis_title=x, yaxis_title="データ数")
+                    fig.update_layout(title_font_size=16)
                     st.plotly_chart(fig, use_container_width=True)
 
             else:  # "各値の件数（Xごとの件数）"
@@ -646,8 +696,13 @@ def main():
                 if st.button("📈 作成", type="primary", key="scatter_btn_freq"):
                     df2 = df_clean[[x]].dropna()
                     cnt = df2.groupby(x, dropna=False).size().reset_index(name="データ数")
-                    fig = px.scatter(cnt, x=x, y="データ数", title=f"{x} ごとの件数")
-                    fig.update_layout(title_font_size=16, xaxis_title=x, yaxis_title="データ数")
+                    if flip_axes:
+                        fig = px.scatter(cnt, x="データ数", y=x, title=f"{x} vs 件数")
+                        fig.update_layout(xaxis_title="データ数", yaxis_title=x)
+                    else:
+                        fig = px.scatter(cnt, x=x, y="データ数", title=f"{x} ごとの件数")
+                        fig.update_layout(xaxis_title=x, yaxis_title="データ数")
+                    fig.update_layout(title_font_size=16)
                     st.plotly_chart(fig, use_container_width=True)
 
     with tab5:
@@ -661,30 +716,33 @@ def main():
             if gtype == "散布図":
                 x = st.selectbox("X軸", ncols, key="gx")
                 y = st.selectbox("Y軸", [c for c in ncols if c != x], key="gy")
+                flip_axes_custom = st.checkbox("XとYを反転（X↔Y）", value=False, key="flip_custom")
             else:
                 x = st.selectbox("X軸", all_cols, key="gx2")
                 y = st.selectbox("Y軸", ncols, key="gy2")
+                flip_axes_custom = False
             color_col = st.selectbox("色分け列（任意）", ["なし"] + all_cols, key="gcolor")
             if st.button("📈 生成", type="primary"):
                 color_param = None if color_col == "なし" else color_col
+                px_x, px_y = (y, x) if (gtype == "散布図" and flip_axes_custom) else (x, y)
                 if gtype == "散布図":
-                    fig = px.scatter(df_clean, x=x, y=y, color=color_param, title=f"{y} vs {x}")
+                    fig = px.scatter(df_clean, x=px_x, y=px_y, color=color_param, title=f"{px_y} vs {px_x}")
                 elif gtype == "折れ線":
                     fig = px.line(df_clean, x=x, y=y, color=color_param, title=f"{y} の推移")
                 elif gtype == "棒":
                     fig = px.bar(df_clean, x=x, y=y, color=color_param, title=f"{y} の棒グラフ")
                 else:
                     fig = px.area(df_clean, x=x, y=y, color=color_param, title=f"{y} の面グラフ")
-                fig.update_layout(title_font_size=16, xaxis_title=x, yaxis_title=y)
+                fig.update_layout(title_font_size=16, xaxis_title=px_x, yaxis_title=px_y)
                 st.plotly_chart(fig, use_container_width=True)
 
                 c1, c2 = st.columns(2)
                 with c1:
-                    xv = df_clean[x]
+                    xv = df_clean[px_x]
                     xv_mean = f"{xv.mean():.2f}" if pd.api.types.is_numeric_dtype(xv) else "N/A"
-                    st.metric(f"{x} 平均", xv_mean)
+                    st.metric(f"{px_x} 平均", xv_mean)
                 with c2:
-                    st.metric(f"{y} 平均", f"{df_clean[y].mean():.2f}")
+                    st.metric(f"{px_y} 平均", f"{df_clean[px_y].mean():.2f}" if pd.api.types.is_numeric_dtype(df_clean[px_y]) else "N/A")
 
     with tab6:
         st.subheader("🔍 データフィルタ")
@@ -712,11 +770,12 @@ def main():
     st.markdown("---")
     st.subheader("💾 エクスポート")
 
-    # PDF 出力オプション（ヒスト全数、散布図Y=データ数）
+    # PDF 出力オプション（ヒスト全数、散布図Y=データ数、軸反転）
     st.markdown("#### 📝 PDF オプション")
     pdf_include_hist = st.checkbox("数値列のヒストグラムをすべて含める", value=True)
     pdf_include_scatter_cum = st.checkbox("散布図（累積データ数 1..N）を含める", value=False)
     pdf_include_scatter_cnt = st.checkbox("散布図（各値の件数）を含める", value=False)
+    pdf_scatter_flip = st.checkbox("（PDF）散布図のXとYを反転（X↔Y）", value=False)
 
     cpx1, cpx2 = st.columns(2)
     with cpx1:
@@ -744,7 +803,8 @@ def main():
                         'include_scatter_cum': pdf_include_scatter_cum,
                         'include_scatter_cnt': pdf_include_scatter_cnt,
                         'scatter_x': scatter_x_for_pdf,
-                        'scatter_color': scatter_color_for_pdf
+                        'scatter_color': scatter_color_for_pdf,
+                        'scatter_flip': pdf_scatter_flip
                     }
                 )
                 if pdf:
