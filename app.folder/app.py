@@ -1,13 +1,17 @@
+# app.py ー 日本語PDF完全版（機能維持＋簡潔化）
 import os
 import io
+import sys
 import warnings
 import tempfile
+from pathlib import Path
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
 import plotly.express as px
 import plotly.graph_objects as go
 from scipy import stats
@@ -16,23 +20,81 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
 )
 
 warnings.filterwarnings("ignore")
 
-# ---------- ページ/フォント設定 ----------
+# ---------------- ページ設定 ----------------
 st.set_page_config(page_title="C3slim データ分析アプリ", page_icon="📊", layout="wide")
-plt.rcParams["font.sans-serif"] = ["DejaVu Sans", "Arial Unicode MS", "Yu Gothic", "Meiryo"]
-plt.rcParams["axes.unicode_minus"] = False
 
-# ---------- ユーティリティ ----------
+# ---------------- 日本語フォント登録 ----------------
+def _first_existing(paths):
+    for p in paths:
+        if p and Path(p).exists():
+            return Path(p)
+    return None
+
+def register_japanese_fonts():
+    """ReportLab と Matplotlib に日本語フォントを登録して返す (font names: normal, bold)。"""
+    app_dir = Path(__file__).parent
+    fonts_dir = app_dir / "fonts"
+
+    # 同梱フォント（推奨: Google Fonts / NotoSansJP）
+    noto_reg = fonts_dir / "NotoSansJP-Regular.ttf"
+    noto_bold = fonts_dir / "NotoSansJP-Bold.ttf"
+
+    # Windows フォントのフォールバック候補（.ttc も可）
+    win_meiryo_reg = Path("C:/Windows/Fonts/meiryo.ttc")
+    win_meiryo_bold = Path("C:/Windows/Fonts/meiryob.ttc")
+    win_yugoth_reg = Path("C:/Windows/Fonts/YuGothR.ttc")
+    win_yugoth_bold = Path("C:/Windows/Fonts/YuGothB.ttc")
+
+    reg_path = _first_existing([noto_reg, win_meiryo_reg, win_yugoth_reg])
+    bold_path = _first_existing([noto_bold, win_meiryo_bold, win_yugoth_bold, reg_path])
+
+    if not reg_path:
+        st.warning("日本語フォントが見つかりませんでした。fonts/NotoSansJP-Regular.ttf を配置してください。")
+        # Matplotlib は日本語環境で自動解決する可能性があるため継続
+        return None, None, None
+
+    # ReportLab 登録名
+    rl_name_reg = "JP"
+    rl_name_bold = "JP-Bold"
+
+    # ReportLab へ登録（TTC でも OK）
+    try:
+        pdfmetrics.registerFont(TTFont(rl_name_reg, str(reg_path)))
+        pdfmetrics.registerFont(TTFont(rl_name_bold, str(bold_path)))
+    except Exception as e:
+        st.error(f"ReportLab フォント登録に失敗: {e}")
+        return None, None, None
+
+    # Matplotlib へ登録
+    try:
+        fm.fontManager.addfont(str(reg_path))
+        if bold_path:
+            fm.fontManager.addfont(str(bold_path))
+        mp_name = fm.FontProperties(fname=str(reg_path)).get_name()
+        plt.rcParams["font.family"] = mp_name
+        plt.rcParams["axes.unicode_minus"] = False
+    except Exception as e:
+        st.warning(f"Matplotlib フォント登録に失敗しました（継続）: {e}")
+        mp_name = None
+
+    return rl_name_reg, rl_name_bold, mp_name
+
+RL_FONT_REG, RL_FONT_BOLD, MPL_FONT_NAME = register_japanese_fonts()
+
+# ---------------- ユーティリティ ----------------
 def numeric_cols(df: pd.DataFrame):
     return df.select_dtypes(include=[np.number]).columns.tolist()
 
 def special_mask(series: pd.Series) -> pd.Series:
-    """'None'(大小無視)と空白行を '欠損として数えない' ために保持するブールマスク"""
+    """'None'(大小無視) と 空白 を '欠損として数えない' 値として扱うためのマスク"""
     s = series.astype(str)
     return s.str.lower().eq("none") | s.str.strip().eq("")
 
@@ -61,7 +123,6 @@ def clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         if dfc[c].dtype == "object":
             m = special_mask(dfc[c])
             masks[c] = m
-            # 数値化の判定（変換成功率 > 50%）
             temp = pd.to_numeric(dfc[c].astype(str).str.replace(",", ""), errors="coerce")
             if temp.notna().mean() > 0.5:
                 dfc[c] = temp
@@ -73,27 +134,26 @@ def basic_stats(df: pd.DataFrame, masks: dict, baseline: dict | None = None) -> 
     cols = numeric_cols(df)
     if not cols or len(df) == 0:
         return None
-    rows = []
-    n = len(df)
+    rows, n = [], len(df)
     for c in cols:
         data = df[c]
-        miss = (data.isna() & ~masks.get(c, pd.Series(False, index=df.index))).sum()
+        miss = int((data.isna() & ~masks.get(c, pd.Series(False, index=df.index))).sum())
         base = baseline.get(c, "") if baseline else ""
         try:
             if base != "" and pd.notna(base):
                 base = round(float(base), 2)
         except Exception:
             pass
-        cnt = data.count()
+        cnt = int(data.count())
         rows.append({
             "列名": c,
             "基準値": base,
-            "データ数": int(cnt),
-            "平均値": round(data.mean(), 2) if cnt else np.nan,
-            "標準偏差": round(data.std(ddof=1), 2) if cnt else np.nan,
-            "最小値": data.min() if cnt else np.nan,
-            "最大値": data.max() if cnt else np.nan,
-            "欠損数": int(miss),
+            "データ数": cnt,
+            "平均値": round(float(data.mean()), 2) if cnt else np.nan,
+            "標準偏差": round(float(data.std(ddof=1)), 2) if cnt else np.nan,
+            "最小値": float(data.min()) if cnt else np.nan,
+            "最大値": float(data.max()) if cnt else np.nan,
+            "欠損数": miss,
             "欠損率(%)": round(miss / n * 100, 2)
         })
     return pd.DataFrame(rows)
@@ -105,7 +165,7 @@ def calc_cpk(df: pd.DataFrame, usl: float, lsl: float) -> pd.DataFrame:
         if len(s) <= 1:
             out.append({"列名": c, "平均値": "N/A", "標準偏差": "N/A", "Cp": "計算不可", "Cpk": "計算不可"})
             continue
-        mu, sd = s.mean(), s.std(ddof=1)
+        mu, sd = float(s.mean()), float(s.std(ddof=1))
         if sd == 0:
             out.append({"列名": c, "平均値": round(mu, 2), "標準偏差": 0, "Cp": "計算不可", "Cpk": "計算不可"})
             continue
@@ -118,7 +178,7 @@ def hist_with_gauss(df: pd.DataFrame, col: str, usl: float | None, lsl: float | 
     data = df[col].dropna()
     if data.empty:
         return None
-    mu, sd = data.mean(), data.std(ddof=1)
+    mu, sd = float(data.mean()), float(data.std(ddof=1))
     hist_values, bins = np.histogram(data, bins=30)
     centers = (bins[:-1] + bins[1:]) / 2
     widths = np.diff(bins)
@@ -130,8 +190,7 @@ def hist_with_gauss(df: pd.DataFrame, col: str, usl: float | None, lsl: float | 
         xs = np.linspace(data.min(), data.max(), 200)
         pdf = stats.norm.pdf(xs, mu, sd)
         fig.add_scatter(x=xs, y=pdf, name="ガウス分布", mode="lines")
-        yaxis2 = dict(overlaying="y", side="right", title="確率密度")
-        fig.update_layout(yaxis2=yaxis2)
+        fig.update_layout(yaxis2=dict(overlaying="y", side="right", title="確率密度"))
 
     title = f"{col} のヒストグラム" + ("" if sd > 0 else "（全データ同一）")
     fig.update_layout(title=title, xaxis_title=col, yaxis_title="頻度", hovermode="x unified", legend=dict(x=0.7, y=1))
@@ -142,6 +201,44 @@ def hist_with_gauss(df: pd.DataFrame, col: str, usl: float | None, lsl: float | 
         fig.add_vline(x=lsl, line_dash="dash", line_color="orange", line_width=2, annotation_text="LSL", annotation_position="top")
     return fig
 
+# ---------------- PDF 生成（日本語対応） ----------------
+def _jp_paragraph_styles():
+    styles = getSampleStyleSheet()
+    # フォント指定（未登録時はデフォルトを使用）
+    title = ParagraphStyle(
+        'TitleJP', parent=styles['Heading1'],
+        fontName=RL_FONT_BOLD or styles['Heading1'].fontName,
+        fontSize=20, textColor=colors.HexColor('#1f77b4'),
+        alignment=1, spaceAfter=18
+    )
+    h2 = ParagraphStyle(
+        'H2JP', parent=styles['Heading2'],
+        fontName=RL_FONT_BOLD or styles['Heading2'].fontName,
+        fontSize=14
+    )
+    normal = ParagraphStyle(
+        'NormalJP', parent=styles['Normal'],
+        fontName=RL_FONT_REG or styles['Normal'].fontName,
+        fontSize=10
+    )
+    return title, h2, normal
+
+def _jp_table_style(header_bold=True):
+    base = [
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+    ]
+    if RL_FONT_REG:
+        base.append(('FONTNAME', (0, 0), (-1, -1), RL_FONT_REG))
+    if header_bold and RL_FONT_BOLD:
+        base.append(('FONTNAME', (0, 0), (-1, 0), RL_FONT_BOLD))
+    base += [
+        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+    ]
+    return TableStyle(base)
+
 def generate_pdf(df_clean: pd.DataFrame, stats_df: pd.DataFrame | None, sheet_name: str, masks: dict) -> bytes | None:
     try:
         tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
@@ -150,12 +247,14 @@ def generate_pdf(df_clean: pd.DataFrame, stats_df: pd.DataFrame | None, sheet_na
         tmp_imgs = []
 
         doc = SimpleDocTemplate(pdf_path, pagesize=A4)
-        story, styles = [], getSampleStyleSheet()
+        story = []
 
-        title = ParagraphStyle("T", parent=styles["Heading1"], fontSize=20, textColor=colors.HexColor("#1f77b4"), alignment=1, spaceAfter=18)
+        title_style, h2_style, normal_style = _jp_paragraph_styles()
+
+        # タイトル/日付
         story += [
-            Paragraph(f"Excel Data Analysis Report<br/>{sheet_name}", title),
-            Paragraph(datetime.now().strftime("Generated: %Y-%m-%d %H:%M:%S"), styles["Normal"]),
+            Paragraph(f"Excel Data Analysis Report<br/>{sheet_name}", title_style),
+            Paragraph(datetime.now().strftime("Generated: %Y-%m-%d %H:%M:%S"), normal_style),
             Spacer(1, 0.3 * inch),
         ]
 
@@ -170,38 +269,28 @@ def generate_pdf(df_clean: pd.DataFrame, stats_df: pd.DataFrame | None, sheet_na
                     ["Total Columns", str(df_clean.shape[1])],
                     ["Numeric Columns", str(len(numeric_cols(df_clean)))],
                     ["Missing Values", str(total_missing)]]
-        t = Table(overview, colWidths=[3 * inch, 2 * inch])
-        t.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("GRID", (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        story += [Paragraph("Data Overview", styles["Heading2"]), Spacer(1, 0.1 * inch), t, Spacer(1, 0.2 * inch)]
+        t_over = Table(overview, colWidths=[3 * inch, 2 * inch])
+        t_over.setStyle(_jp_table_style())
+        story += [Paragraph("Data Overview", h2_style), t_over, Spacer(1, 0.2 * inch)]
 
         # 基本統計量
         if stats_df is not None and not stats_df.empty:
             head_df = stats_df.head(10)
             data = [head_df.columns.tolist()] + [[str(v) for v in r] for r in head_df.to_numpy()]
-            t2 = Table(data, repeatRows=1)
-            t2.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                ("GRID", (0, 0), (-1, -1), 1, colors.black),
-                ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ]))
-            story += [Paragraph("Basic Statistics", styles["Heading2"]), Spacer(1, 0.1 * inch), t2, Spacer(1, 0.2 * inch)]
+            t_stats = Table(data, repeatRows=1)
+            t_stats.setStyle(_jp_table_style())
+            story += [Paragraph("Basic Statistics", h2_style), t_stats, Spacer(1, 0.2 * inch)]
 
         # ヒスト（最初の6数値列）
         ncols = numeric_cols(df_clean)[:6]
         if ncols:
-            story += [PageBreak(), Paragraph("Distribution Charts", styles["Heading2"]), Spacer(1, 0.1 * inch)]
+            story += [PageBreak(), Paragraph("Distribution Charts", h2_style), Spacer(1, 0.1 * inch)]
             for i, c in enumerate(ncols):
                 fig, ax = plt.subplots(figsize=(6, 3))
                 df_clean[c].dropna().hist(bins=30, ax=ax, edgecolor="black")
-                ax.set_title(f"{c} Distribution")
-                ax.set_xlabel(c); ax.set_ylabel("Frequency")
+                ax.set_title(f"{c} Distribution", fontname=MPL_FONT_NAME if MPL_FONT_NAME else None)
+                ax.set_xlabel(c, fontname=MPL_FONT_NAME if MPL_FONT_NAME else None)
+                ax.set_ylabel("Frequency", fontname=MPL_FONT_NAME if MPL_FONT_NAME else None)
 
                 tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
                 plt.savefig(tmp_img.name, bbox_inches="tight", dpi=110)
@@ -227,7 +316,7 @@ def generate_pdf(df_clean: pd.DataFrame, stats_df: pd.DataFrame | None, sheet_na
         st.error(f"PDF生成エラー: {e}")
         return None
 
-# ---------- メイン ----------
+# ---------------- メインアプリ ----------------
 def main():
     st.title("📊 C3slim データ分析アプリ")
     st.markdown("---")
@@ -269,7 +358,7 @@ def main():
     df_clean, masks = clean_data(df_raw)
     base = st.session_state.baseline.get(st.session_state.sheet, {})
 
-    # ---------- タブ ----------
+    # ---------------- タブ ----------------
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
         ["📋 データプレビュー", "📈 基本統計量", "📊 ヒストグラム", "🔵 散布図", "🎨 カスタムグラフ", "🔍 データフィルタ"])
 
@@ -379,10 +468,10 @@ def main():
                 c5.metric("最大値", f"{s.max():.3f}")
 
                 if usl_v is not None and lsl_v is not None and usl_v > lsl_v:
-                    sd = s.std(ddof=1)
+                    sd = float(s.std(ddof=1))
                     if sd > 0:
                         cp = (usl_v - lsl_v) / (6 * sd)
-                        cpk = min((usl_v - s.mean()) / (3 * sd), (s.mean() - lsl_v) / (3 * sd))
+                        cpk = min((usl_v - float(s.mean())) / (3 * sd), (float(s.mean()) - lsl_v) / (3 * sd))
                         st.markdown("#### 🎯 工程能力指数")
                         d1, d2 = st.columns(2)
                         d1.metric("Cp", f"{cp:.3f}")
@@ -441,7 +530,6 @@ def main():
                 fig.update_layout(title_font_size=16, xaxis_title=x, yaxis_title=y)
                 st.plotly_chart(fig, use_container_width=True)
 
-                # 参考：平均
                 c1, c2 = st.columns(2)
                 with c1:
                     xv = df_clean[x]
@@ -472,7 +560,7 @@ def main():
                 st.download_button("📥 フィルタ後CSV", filt.to_csv(index=False, encoding="utf-8-sig"),
                                    "filtered_data.csv", "text/csv")
 
-    # ---------- エクスポート ----------
+    # ---------------- エクスポート ----------------
     st.markdown("---")
     st.subheader("💾 エクスポート")
     c1, c2, c3 = st.columns(3)
