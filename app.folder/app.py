@@ -1,4 +1,5 @@
-
+# app.py ― 日本語PDF対応・全件レポート・CSV文字化け対策・
+#            「Y=データ数」散布図（累積/件数）＆PDF出力対応 【修正版 完全版】
 import warnings
 from pathlib import Path
 from datetime import datetime
@@ -32,7 +33,7 @@ st.set_page_config(page_title="C3slim データ分析アプリ", page_icon="📊
 def register_japanese_fonts():
     """ReportLab/Matplotlib に日本語フォントを登録。
        1) fonts/NotoSansJP-*.ttf があればそれを埋め込み
-       2) なければ CID フォント HeiseiKakuGo-W5 にフォールバック
+       2) なければ CID フォント HeiseiKakuGo-W5 にフォールバック（PDFのみ日本語可）
     """
     app_dir = Path(__file__).parent
     fonts_dir = app_dir / "fonts"
@@ -58,7 +59,7 @@ def register_japanese_fonts():
         except Exception as e:
             st.error(f"NotoSansJP の登録に失敗しました: {e}")
 
-    # 同梱フォントが無い/失敗 → CID フォントへ
+    # 同梱フォントが無い/失敗 → CID フォントへ（PDF内テキストはOK、matplotlib画像は環境既定フォント）
     if RL_FONT_REG is None:
         try:
             pdfmetrics.registerFont(UnicodeCIDFont('HeiseiKakuGo-W5'))  # ゴシック体
@@ -364,8 +365,8 @@ def generate_pdf(
                         ax.set_ylabel("Frequency")
 
                     tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-                    plt.savefig(tmp_img.name, bbox_inches="tight", dpi=110)
-                    plt.close()
+                    fig.savefig(tmp_img.name, bbox_inches="tight", dpi=110)  # ← fig.savefig に修正
+                    plt.close(fig)
                     tmp_imgs.append(tmp_img.name)
 
                     story += [Image(tmp_img.name, width=5 * inch, height=2.5 * inch), Spacer(1, 0.2 * inch)]
@@ -379,16 +380,16 @@ def generate_pdf(
             if include_scatter_cum:
                 fig = make_scatter_cumulative_fig(df_clean, scatter_x, color_col=scatter_color, fontname=MPL_FONT_NAME)
                 tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-                plt.savefig(tmp_img.name, bbox_inches="tight", dpi=110)
-                plt.close()
+                fig.savefig(tmp_img.name, bbox_inches="tight", dpi=110)  # ← fig.savefig に修正
+                plt.close(fig)
                 tmp_imgs.append(tmp_img.name)
                 story += [Image(tmp_img.name, width=5 * inch, height=2.5 * inch), Spacer(1, 0.2 * inch)]
 
             if include_scatter_cnt:
                 fig = make_scatter_counts_fig(df_clean, scatter_x, fontname=MPL_FONT_NAME)
                 tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-                plt.savefig(tmp_img.name, bbox_inches="tight", dpi=110)
-                plt.close()
+                fig.savefig(tmp_img.name, bbox_inches="tight", dpi=110)  # ← fig.savefig に修正
+                plt.close(fig)
                 tmp_imgs.append(tmp_img.name)
                 story += [Image(tmp_img.name, width=5 * inch, height=2.5 * inch), Spacer(1, 0.2 * inch)]
 
@@ -472,7 +473,7 @@ def main():
             st.caption(f"表示: 上位10行 / 全{len(df_raw)}行")
         with c2:
             st.write("🧹 **クリーニング後**"); st.dataframe(df_clean.head(10), use_container_width=True)
-            st.caption(f"表示: 上位10行 / 全{len[df_clean]}行")
+            st.caption(f"表示: 上位10行 / 全{len(df_clean)}行")  # ← 修正済み
 
         st.subheader("📋 データ型/欠損")
         c1, c2 = st.columns(2)
