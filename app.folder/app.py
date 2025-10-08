@@ -1,11 +1,9 @@
-# app.py ー 日本語PDF完全版（機能維持＋簡潔化）
-import os
-import io
-import sys
+
 import warnings
-import tempfile
 from pathlib import Path
 from datetime import datetime
+import tempfile
+import os
 
 import numpy as np
 import pandas as pd
@@ -22,70 +20,56 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
 )
 
 warnings.filterwarnings("ignore")
-
-# ---------------- ページ設定 ----------------
 st.set_page_config(page_title="C3slim データ分析アプリ", page_icon="📊", layout="wide")
 
-# ---------------- 日本語フォント登録 ----------------
-def _first_existing(paths):
-    for p in paths:
-        if p and Path(p).exists():
-            return Path(p)
-    return None
-
+# ---------------- 日本語フォント登録（TTF優先→CIDフォールバック） ----------------
 def register_japanese_fonts():
-    """ReportLab と Matplotlib に日本語フォントを登録して返す (font names: normal, bold)。"""
+    """ReportLab/Matplotlib に日本語フォントを登録。
+       1) fonts/NotoSansJP-*.ttf があればそれを埋め込み
+       2) なければ CID フォント HeiseiKakuGo-W5 にフォールバック
+    """
     app_dir = Path(__file__).parent
     fonts_dir = app_dir / "fonts"
-
-    # 同梱フォント（推奨: Google Fonts / NotoSansJP）
     noto_reg = fonts_dir / "NotoSansJP-Regular.ttf"
     noto_bold = fonts_dir / "NotoSansJP-Bold.ttf"
 
-    # Windows フォントのフォールバック候補（.ttc も可）
-    win_meiryo_reg = Path("C:/Windows/Fonts/meiryo.ttc")
-    win_meiryo_bold = Path("C:/Windows/Fonts/meiryob.ttc")
-    win_yugoth_reg = Path("C:/Windows/Fonts/YuGothR.ttc")
-    win_yugoth_bold = Path("C:/Windows/Fonts/YuGothB.ttc")
+    RL_FONT_REG = RL_FONT_BOLD = None
+    MPL_FONT_NAME = None
 
-    reg_path = _first_existing([noto_reg, win_meiryo_reg, win_yugoth_reg])
-    bold_path = _first_existing([noto_bold, win_meiryo_bold, win_yugoth_bold, reg_path])
+    if noto_reg.exists():
+        try:
+            pdfmetrics.registerFont(TTFont("JP", str(noto_reg)))
+            pdfmetrics.registerFont(TTFont("JP-Bold", str(noto_bold if noto_bold.exists() else noto_reg)))
+            RL_FONT_REG, RL_FONT_BOLD = "JP", "JP-Bold"
 
-    if not reg_path:
-        st.warning("日本語フォントが見つかりませんでした。fonts/NotoSansJP-Regular.ttf を配置してください。")
-        # Matplotlib は日本語環境で自動解決する可能性があるため継続
-        return None, None, None
+            # Matplotlib にも同梱フォントを追加
+            fm.fontManager.addfont(str(noto_reg))
+            if noto_bold.exists():
+                fm.fontManager.addfont(str(noto_bold))
+            MPL_FONT_NAME = fm.FontProperties(fname=str(noto_reg)).get_name()
+            plt.rcParams["font.family"] = MPL_FONT_NAME
+            plt.rcParams["axes.unicode_minus"] = False
+        except Exception as e:
+            st.error(f"NotoSansJP の登録に失敗しました: {e}")
 
-    # ReportLab 登録名
-    rl_name_reg = "JP"
-    rl_name_bold = "JP-Bold"
+    # 同梱フォントが無い/失敗 → CID フォントへ
+    if RL_FONT_REG is None:
+        try:
+            pdfmetrics.registerFont(UnicodeCIDFont('HeiseiKakuGo-W5'))  # ゴシック体
+            RL_FONT_REG = RL_FONT_BOLD = 'HeiseiKakuGo-W5'
+            st.sidebar.warning("NotoSansJP が見つからないため CID フォント(HeiseiKakuGo-W5)でPDFを出力します。")
+        except Exception as e:
+            st.error(f"CIDフォント登録に失敗: {e}")
 
-    # ReportLab へ登録（TTC でも OK）
-    try:
-        pdfmetrics.registerFont(TTFont(rl_name_reg, str(reg_path)))
-        pdfmetrics.registerFont(TTFont(rl_name_bold, str(bold_path)))
-    except Exception as e:
-        st.error(f"ReportLab フォント登録に失敗: {e}")
-        return None, None, None
-
-    # Matplotlib へ登録
-    try:
-        fm.fontManager.addfont(str(reg_path))
-        if bold_path:
-            fm.fontManager.addfont(str(bold_path))
-        mp_name = fm.FontProperties(fname=str(reg_path)).get_name()
-        plt.rcParams["font.family"] = mp_name
-        plt.rcParams["axes.unicode_minus"] = False
-    except Exception as e:
-        st.warning(f"Matplotlib フォント登録に失敗しました（継続）: {e}")
-        mp_name = None
-
-    return rl_name_reg, rl_name_bold, mp_name
+    # デバッグ表示
+    st.sidebar.info(f"PDFフォント: {RL_FONT_REG} / 太字: {RL_FONT_BOLD} / MPL: {MPL_FONT_NAME or '未設定'}")
+    return RL_FONT_REG, RL_FONT_BOLD, MPL_FONT_NAME
 
 RL_FONT_REG, RL_FONT_BOLD, MPL_FONT_NAME = register_japanese_fonts()
 
@@ -201,10 +185,19 @@ def hist_with_gauss(df: pd.DataFrame, col: str, usl: float | None, lsl: float | 
         fig.add_vline(x=lsl, line_dash="dash", line_color="orange", line_width=2, annotation_text="LSL", annotation_position="top")
     return fig
 
-# ---------------- PDF 生成（日本語対応） ----------------
+def csv_bytes(df: pd.DataFrame, encoding: str = "cp932") -> bytes:
+    """Excel向け(Windows)の既定はcp932。UTF-8(BOM)も選べる。"""
+    csv_text = df.to_csv(index=False)
+    if encoding.lower() in ("cp932", "shift_jis", "sjis"):
+        return csv_text.encode("cp932", errors="replace")
+    elif encoding.lower() == "utf-8-sig":
+        return csv_text.encode("utf-8-sig")
+    else:
+        return csv_text.encode(encoding, errors="replace")
+
+# ---------------- PDF 生成（日本語対応・全件出力） ----------------
 def _jp_paragraph_styles():
     styles = getSampleStyleSheet()
-    # フォント指定（未登録時はデフォルトを使用）
     title = ParagraphStyle(
         'TitleJP', parent=styles['Heading1'],
         fontName=RL_FONT_BOLD or styles['Heading1'].fontName,
@@ -273,24 +266,28 @@ def generate_pdf(df_clean: pd.DataFrame, stats_df: pd.DataFrame | None, sheet_na
         t_over.setStyle(_jp_table_style())
         story += [Paragraph("Data Overview", h2_style), t_over, Spacer(1, 0.2 * inch)]
 
-        # 基本統計量
+        # 基本統計量（全行）
         if stats_df is not None and not stats_df.empty:
-            head_df = stats_df.head(10)
-            data = [head_df.columns.tolist()] + [[str(v) for v in r] for r in head_df.to_numpy()]
+            data = [stats_df.columns.tolist()] + [[str(v) for v in r] for r in stats_df.to_numpy()]
             t_stats = Table(data, repeatRows=1)
             t_stats.setStyle(_jp_table_style())
             story += [Paragraph("Basic Statistics", h2_style), t_stats, Spacer(1, 0.2 * inch)]
 
-        # ヒスト（最初の6数値列）
-        ncols = numeric_cols(df_clean)[:6]
+        # ヒスト（全数値列）
+        ncols = numeric_cols(df_clean)
         if ncols:
             story += [PageBreak(), Paragraph("Distribution Charts", h2_style), Spacer(1, 0.1 * inch)]
             for i, c in enumerate(ncols):
                 fig, ax = plt.subplots(figsize=(6, 3))
                 df_clean[c].dropna().hist(bins=30, ax=ax, edgecolor="black")
-                ax.set_title(f"{c} Distribution", fontname=MPL_FONT_NAME if MPL_FONT_NAME else None)
-                ax.set_xlabel(c, fontname=MPL_FONT_NAME if MPL_FONT_NAME else None)
-                ax.set_ylabel("Frequency", fontname=MPL_FONT_NAME if MPL_FONT_NAME else None)
+                if MPL_FONT_NAME:
+                    ax.set_title(f"{c} Distribution", fontname=MPL_FONT_NAME)
+                    ax.set_xlabel(c, fontname=MPL_FONT_NAME)
+                    ax.set_ylabel("Frequency", fontname=MPL_FONT_NAME)
+                else:
+                    ax.set_title(f"{c} Distribution")
+                    ax.set_xlabel(c)
+                    ax.set_ylabel("Frequency")
 
                 tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
                 plt.savefig(tmp_img.name, bbox_inches="tight", dpi=110)
@@ -321,14 +318,25 @@ def main():
     st.title("📊 C3slim データ分析アプリ")
     st.markdown("---")
 
-    # サイドバー：アップロード & シート選択
+    # サイドバー：アップロード & CSV文字コード
     st.sidebar.header("📁 ファイルアップロード")
     up = st.sidebar.file_uploader("Excelファイルを選択 (.xlsx/.xls)", type=["xlsx", "xls"])
 
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🧾 CSVの文字コード")
+    st.sidebar.radio(
+        "Excelで文字化けする場合は『cp932』を選択してください。",
+        ["cp932 (Shift_JIS/Excel向け)", "utf-8-sig (UTF-8/BOM)"],
+        index=0, horizontal=False, key="csv_enc_label"
+    )
+    st.session_state["csv_enc"] = "cp932" if st.session_state.csv_enc_label.startswith("cp932") else "utf-8-sig"
+
+    # セッション初期化
     if "all_sheets" not in st.session_state: st.session_state.all_sheets = {}
     if "baseline" not in st.session_state: st.session_state.baseline = {}
     if "sheet" not in st.session_state: st.session_state.sheet = None
 
+    # ファイル読み込み
     if up:
         with st.spinner("ファイルを読み込み中..."):
             sheets, base = load_excel(up)
@@ -390,7 +398,8 @@ def main():
         stats_df = basic_stats(df_clean, masks, base)
         if stats_df is not None:
             st.dataframe(stats_df, use_container_width=True)
-            st.download_button("📥 統計量CSV", stats_df.to_csv(index=False, encoding="utf-8-sig"), "basic_statistics.csv", "text/csv")
+            st.download_button("📥 統計量CSV", data=csv_bytes(stats_df, st.session_state["csv_enc"]),
+                               file_name="basic_statistics.csv", mime="text/csv")
             st.markdown("---")
 
             st.subheader("🎯 工程能力指数 (Cp, Cpk)")
@@ -407,8 +416,8 @@ def main():
                     cpk_df = calc_cpk(df_clean, usl, lsl)
                     st.dataframe(cpk_df, use_container_width=True)
                     st.info("目安：1.67≧優良 / 1.33≧良好 / 1.00≧許容 / 1.00未満は改善要")
-                    st.download_button("📥 Cp/Cpk CSV", cpk_df.to_csv(index=False, encoding="utf-8-sig"),
-                                       "process_capability.csv", "text/csv")
+                    st.download_button("📥 Cp/Cpk CSV", data=csv_bytes(cpk_df, st.session_state["csv_enc"]),
+                                       file_name="process_capability.csv", mime="text/csv")
         else:
             st.warning("数値列が見つかりません。")
 
@@ -419,7 +428,6 @@ def main():
             st.warning("数値列が見つかりません。")
         else:
             col = st.selectbox("列を選択", ncols)
-            # 基準値提示とコピー
             base_val = base.get(col, "")
             if base_val != "" and pd.notna(base_val):
                 try:
@@ -456,7 +464,6 @@ def main():
             fig = hist_with_gauss(df_clean, col, usl_v, lsl_v)
             if fig: st.plotly_chart(fig, use_container_width=True)
 
-            # サマリー & Cp/Cpk（当該列のみ）
             s = df_clean[col].dropna()
             if not s.empty:
                 st.markdown("#### 📊 統計サマリー")
@@ -557,19 +564,19 @@ def main():
             fstats = basic_stats(filt, masks, base)
             if fstats is not None:
                 st.dataframe(fstats, use_container_width=True)
-                st.download_button("📥 フィルタ後CSV", filt.to_csv(index=False, encoding="utf-8-sig"),
-                                   "filtered_data.csv", "text/csv")
+                st.download_button("📥 フィルタ後CSV", data=csv_bytes(filt, st.session_state["csv_enc"]),
+                                   file_name="filtered_data.csv", mime="text/csv")
 
     # ---------------- エクスポート ----------------
     st.markdown("---")
     st.subheader("💾 エクスポート")
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.download_button("📥 元データCSV", df_raw.to_csv(index=False, encoding="utf-8-sig"),
-                           "original_data.csv", "text/csv")
+        st.download_button("📥 元データCSV", data=csv_bytes(df_raw, st.session_state["csv_enc"]),
+                           file_name="original_data.csv", mime="text/csv")
     with c2:
-        st.download_button("📥 クリーニング後CSV", df_clean.to_csv(index=False, encoding="utf-8-sig"),
-                           "cleaned_data.csv", "text/csv")
+        st.download_button("📥 クリーニング後CSV", data=csv_bytes(df_clean, st.session_state["csv_enc"]),
+                           file_name="cleaned_data.csv", mime="text/csv")
     with c3:
         if st.button("📄 PDFレポート生成", type="primary"):
             with st.spinner("PDFを生成中..."):
